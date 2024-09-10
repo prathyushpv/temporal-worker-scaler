@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scaler-config
+  namespace: oms
+data:
+  command_output.txt: "10000"  # Replace this value with the actual output

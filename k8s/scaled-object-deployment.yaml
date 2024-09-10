@@ -1,0 +1,17 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: main-worker-scaler
+  namespace: oms  # The namespace where the main-worker deployment exists
+spec:
+  scaleTargetRef:
+    name: main-worker  # Name of the deployment you want to scale
+    kind: Deployment
+  minReplicaCount: 1   # Minimum number of replicas
+  maxReplicaCount: 10 # Maximum number of replicas to scale to
+  pollingInterval: 1  # How frequently KEDA checks the external scaler (in seconds)
+  cooldownPeriod: 1  # Time to wait after downscaling
+  triggers:
+  - type: external
+    metadata:
+      scalerAddress: "external-scaler-service.oms.svc.cluster.local:8080"  # Ensure this is HTTP

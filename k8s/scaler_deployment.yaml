@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: external-scaler
+  namespace: oms
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: external-scaler
+  template:
+    metadata:
+      labels:
+        app: external-scaler
+    spec:
+      containers:
+        - name: external-scaler
+          image: prathyushpv/external-scaler:latest
+          volumeMounts:
+            - name: scaler-data
+              mountPath: /data
+          ports:
+            - containerPort: 8080
+      volumes:
+        - name: scaler-data
+          configMap:  # This example assumes you are using a ConfigMap to store the file content
+            name: scaler-config
