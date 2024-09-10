@@ -9,9 +9,10 @@ spec:
     kind: Deployment
   minReplicaCount: 1   # Minimum number of replicas
   maxReplicaCount: 10 # Maximum number of replicas to scale to
-  pollingInterval: 1  # How frequently KEDA checks the external scaler (in seconds)
-  cooldownPeriod: 1  # Time to wait after downscaling
+  pollingInterval: 10  # How frequently KEDA checks the external scaler (in seconds)
+  cooldownPeriod: 10  # Time to wait after downscaling
   triggers:
   - type: external
+    metricType: Value
     metadata:
-      scalerAddress: "external-scaler-service.oms.svc.cluster.local:8080"  # Ensure this is HTTP
+      scalerAddress: "external-scaler-service.oms.svc.cluster.local:8080"

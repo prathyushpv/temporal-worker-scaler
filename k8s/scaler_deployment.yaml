@@ -13,6 +13,7 @@ spec:
       labels:
         app: external-scaler
     spec:
+
       containers:
         - name: external-scaler
           image: prathyushpv/external-scaler:latest
@@ -21,6 +22,11 @@ spec:
               mountPath: /data
           ports:
             - containerPort: 8080
+          env:
+            - name: TEMPORAL_ADDRESS
+              value: temporal-frontend.temporal:7233
+            - name: TEMPORAL_TASK_QUEUES
+              value: orders,billing,shipments
       volumes:
         - name: scaler-data
           configMap:  # This example assumes you are using a ConfigMap to store the file content

@@ -2,13 +2,17 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"os"
-	"strconv"
 	"strings"
 
-	"github.com/prathyushpv/grpc-scaler/externalscaler" // Import the generated proto package
+	"github.com/prathyushpv/grpc-scaler/externalscaler"
+	"go.temporal.io/sdk/client"
+	sdklog "go.temporal.io/sdk/log"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 )
@@ -16,129 +20,105 @@ import (
 // Server implements the ExternalScaler gRPC server.
 type Server struct {
 	externalscaler.UnimplementedExternalScalerServer
+	client client.Client
 }
-
-// Add a global or persistent variable to store the previous value
-var previousValue int
-
-//func (s *Server) IsActive(ctx context.Context, scaledObjectRef *externalscaler.ScaledObjectRef) (*externalscaler.IsActiveResponse, error) {
-//	// Read the current value from the file
-//	filePath := "/data/command_output.txt"
-//	fileContent, err := os.ReadFile(filePath)
-//	if err != nil {
-//		log.Printf("Error reading file %s: %v", filePath, err)
-//		return &externalscaler.IsActiveResponse{Result: false}, nil // Return false if there's an error
-//	}
-//
-//	trimmedContent := strings.TrimSpace(string(fileContent))
-//	currentValue, err := strconv.Atoi(trimmedContent)
-//	if err != nil {
-//		log.Printf("Error converting file content to integer: %v", err)
-//		return &externalscaler.IsActiveResponse{Result: false}, nil // Return false on conversion failure
-//	}
-//
-//	// Determine if scaling is required based on the current and previous values
-//	isActive := currentValue > previousValue // Active if current value is greater than previous
-//
-//	// Update the previous value for future comparison
-//	previousValue = currentValue
-//
-//	fmt.Printf("IsActive: %v\n", isActive)
-//	// Return whether scaling is active
-//	return &externalscaler.IsActiveResponse{Result: isActive}, nil
-//}
 
 func (s *Server) IsActive(ctx context.Context, scaledObjectRef *externalscaler.ScaledObjectRef) (*externalscaler.IsActiveResponse, error) {
 	return &externalscaler.IsActiveResponse{Result: true}, nil
 }
 
-//// GetMetricSpec defines the metric that will be used for scaling.
-//func (s *Server) GetMetricSpec(ctx context.Context, scaledObjectRef *externalscaler.ScaledObjectRef) (*externalscaler.MetricSpecResponse, error) {
-//	metricName := "custom_metric"
-//	targetValue := int64(1000) // Define the target value for the metric.
-//
-//	metricSpec := &externalscaler.MetricSpec{
-//		MetricName:  metricName,
-//		TargetValue: targetValue,
-//	}
-//	fmt.Printf("GetMetricSpec: %v\n", metricSpec)
-//
-//	return &externalscaler.MetricSpecResponse{
-//		MetricSpecs: []*externalscaler.MetricSpec{metricSpec},
-//	}, nil
-//}
-
 func (s *Server) GetMetricSpec(ctx context.Context, scaledObjectRef *externalscaler.ScaledObjectRef) (*externalscaler.MetricSpecResponse, error) {
-	metricName := "file_based_metric"
+	metricName := "taskqueue_backlog"
 
-	// Absolute target value for the entire deployment, not per-replica
-	targetValue := int64(1000)
+	// Absolute target value for the entire deployment, not per-replica. Scale up if it is greater than this value.
+	targetValue := int64(100)
 
 	metricSpec := &externalscaler.MetricSpec{
 		MetricName:  metricName,
 		TargetValue: targetValue, // Absolute value
 	}
 
+	log.Printf("Response of  GetMetricSpec: %v", metricSpec)
 	return &externalscaler.MetricSpecResponse{
 		MetricSpecs: []*externalscaler.MetricSpec{metricSpec},
 	}, nil
 }
 
-//// GetMetrics returns the actual value of the custom metric.
-//func (s *Server) GetMetrics(ctx context.Context, req *externalscaler.GetMetricsRequest) (*externalscaler.GetMetricsResponse, error) {
-//	filePath := "/data/command_output.txt"
-//	fileContent, err := os.ReadFile(filePath)
-//	if err != nil {
-//		log.Printf("Error reading file %s: %v", filePath, err)
-//		return &externalscaler.GetMetricsResponse{}, nil
-//	}
-//
-//	trimmedContent := strings.TrimSpace(string(fileContent))
-//	fileValue, err := strconv.Atoi(trimmedContent)
-//	if err != nil {
-//		log.Printf("Error converting file content to integer: %v", err)
-//		return &externalscaler.GetMetricsResponse{}, nil
-//	}
-//
-//	metricValue := &externalscaler.MetricValue{
-//		MetricName:  req.MetricName,
-//		MetricValue: int64(fileValue), // Scaling logic, e.g., divide by 1000
-//	}
-//
-//	fmt.Printf("GetMetrics: %v\n", metricValue)
-//	return &externalscaler.GetMetricsResponse{
-//		MetricValues: []*externalscaler.MetricValue{metricValue},
-//	}, nil
-//}
-
 func (s *Server) GetMetrics(ctx context.Context, req *externalscaler.GetMetricsRequest) (*externalscaler.GetMetricsResponse, error) {
-	// Read the value from the file
-	filePath := "/data/command_output.txt"
-	fileContent, err := os.ReadFile(filePath)
-	if err != nil {
-		log.Printf("Error reading file %s: %v", filePath, err)
-		return &externalscaler.GetMetricsResponse{}, nil // Return empty response on error
+	taskQueues := os.Getenv("TEMPORAL_TASK_QUEUES")
+	taskQueueNames := strings.SplitN(taskQueues, ",", -1)
+
+	var backlogCount int64
+	for _, taskQueueName := range taskQueueNames {
+		resp, err := s.client.DescribeTaskQueueEnhanced(ctx, client.DescribeTaskQueueEnhancedOptions{
+			TaskQueue: taskQueueName,
+		})
+		if err != nil {
+			log.Printf("Error describing task queue %s: %v", taskQueueName, err)
+			return &externalscaler.GetMetricsResponse{}, err
+		}
+
+		// Get the backlog count from the enhanced response
+		backlogCount += getBacklogCount(resp)
 	}
 
-	trimmedContent := strings.TrimSpace(string(fileContent))
-	currentValue, err := strconv.Atoi(trimmedContent)
-	if err != nil {
-		log.Printf("Error converting file content to integer: %v", err)
-		return &externalscaler.GetMetricsResponse{}, nil // Return empty response on error
-	}
-
-	// Divide the value by 1000 to calculate the absolute metric value
-	metricValue := int64(currentValue)
-
-	// Return the absolute value (not an average)
+	// Return the backlog count as the metric value (total backlog size)
 	metric := &externalscaler.MetricValue{
 		MetricName:  req.MetricName, // Use the requested metric name
-		MetricValue: metricValue,    // Return the total absolute value
+		MetricValue: backlogCount,   // Return the backlog size as the metric value
 	}
 
+	log.Printf("Response of  GetMetrics: %v", metric)
 	return &externalscaler.GetMetricsResponse{
 		MetricValues: []*externalscaler.MetricValue{metric},
 	}, nil
+}
+
+func getBacklogCount(description client.TaskQueueDescription) int64 {
+	var count int64
+	for _, versionInfo := range description.VersionsInfo {
+		fmt.Printf("%v\n", versionInfo)
+		for _, typeInfo := range versionInfo.TypesInfo {
+			if typeInfo.Stats != nil {
+				count += typeInfo.Stats.ApproximateBacklogCount
+			}
+		}
+	}
+	return count
+}
+
+func createClientOptionsFromEnv() (client.Options, error) {
+	hostPort := os.Getenv("TEMPORAL_ADDRESS")
+	namespaceName := os.Getenv("TEMPORAL_NAMESPACE")
+
+	// Must explicitly set the Namepace for non-cloud use.
+	if strings.Contains(hostPort, ".tmprl.cloud:") && namespaceName == "" {
+		return client.Options{}, fmt.Errorf("Namespace name unspecified; required for Temporal Cloud")
+	}
+
+	if namespaceName == "" {
+		namespaceName = "default"
+		fmt.Printf("Namespace name unspecified; using value '%s'\n", namespaceName)
+	}
+
+	clientOpts := client.Options{
+		HostPort:  hostPort,
+		Namespace: namespaceName,
+		Logger:    sdklog.NewStructuredLogger(slog.Default()),
+	}
+
+	if certPath := os.Getenv("TEMPORAL_TLS_CERT"); certPath != "" {
+		cert, err := tls.LoadX509KeyPair(certPath, os.Getenv("TEMPORAL_TLS_KEY"))
+		if err != nil {
+			return clientOpts, fmt.Errorf("failed loading key pair: %w", err)
+		}
+
+		clientOpts.ConnectionOptions.TLS = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+		}
+	}
+
+	return clientOpts, nil
 }
 
 func main() {
@@ -150,7 +130,15 @@ func main() {
 	}
 
 	grpcServer := grpc.NewServer()
-	externalscaler.RegisterExternalScalerServer(grpcServer, &Server{})
+	clientOptions, err := createClientOptionsFromEnv()
+	if err != nil {
+		log.Printf("Failed to connect to temporal server")
+		return
+	}
+
+	c, err := client.Dial(clientOptions)
+	defer c.Close()
+	externalscaler.RegisterExternalScalerServer(grpcServer, &Server{client: c})
 
 	// Register reflection service on gRPC server.
 	reflection.Register(grpcServer)
