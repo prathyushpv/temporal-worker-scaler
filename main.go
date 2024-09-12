@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log"
 	"log/slog"
@@ -14,8 +15,10 @@ import (
 	"go.temporal.io/sdk/client"
 	sdklog "go.temporal.io/sdk/log"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/reflection"
+	"google.golang.org/grpc/metadata"
 )
+
+const TargetBacklog = 100
 
 // Server implements the ExternalScaler gRPC server.
 type Server struct {
@@ -31,7 +34,7 @@ func (s *Server) GetMetricSpec(ctx context.Context, scaledObjectRef *externalsca
 	metricName := "taskqueue_backlog"
 
 	// Absolute target value for the entire deployment, not per-replica. Scale up if it is greater than this value.
-	targetValue := int64(100)
+	targetValue := int64(TargetBacklog)
 
 	metricSpec := &externalscaler.MetricSpec{
 		MetricName:  metricName,
@@ -51,7 +54,8 @@ func (s *Server) GetMetrics(ctx context.Context, req *externalscaler.GetMetricsR
 	var backlogCount int64
 	for _, taskQueueName := range taskQueueNames {
 		resp, err := s.client.DescribeTaskQueueEnhanced(ctx, client.DescribeTaskQueueEnhancedOptions{
-			TaskQueue: taskQueueName,
+			TaskQueue:   taskQueueName,
+			ReportStats: true,
 		})
 		if err != nil {
 			log.Printf("Error describing task queue %s: %v", taskQueueName, err)
@@ -77,7 +81,7 @@ func (s *Server) GetMetrics(ctx context.Context, req *externalscaler.GetMetricsR
 func getBacklogCount(description client.TaskQueueDescription) int64 {
 	var count int64
 	for _, versionInfo := range description.VersionsInfo {
-		fmt.Printf("%v\n", versionInfo)
+		fmt.Printf("%+v\n", versionInfo)
 		for _, typeInfo := range versionInfo.TypesInfo {
 			if typeInfo.Stats != nil {
 				count += typeInfo.Stats.ApproximateBacklogCount
@@ -91,9 +95,12 @@ func createClientOptionsFromEnv() (client.Options, error) {
 	hostPort := os.Getenv("TEMPORAL_ADDRESS")
 	namespaceName := os.Getenv("TEMPORAL_NAMESPACE")
 
-	// Must explicitly set the Namepace for non-cloud use.
-	if strings.Contains(hostPort, ".tmprl.cloud:") && namespaceName == "" {
-		return client.Options{}, fmt.Errorf("Namespace name unspecified; required for Temporal Cloud")
+	useCloudMtls := strings.Contains(hostPort, ".tmprl.cloud:")
+	useCloudApiKey := strings.Contains(hostPort, ".api.temporal.io:")
+
+	// Must explicitly set the Namespace for cloud use.
+	if (useCloudMtls || useCloudApiKey) && namespaceName == "" {
+		return client.Options{}, errors.New("namespace name unspecified; required for Temporal Cloud")
 	}
 
 	if namespaceName == "" {
@@ -107,7 +114,27 @@ func createClientOptionsFromEnv() (client.Options, error) {
 		Logger:    sdklog.NewStructuredLogger(slog.Default()),
 	}
 
-	if certPath := os.Getenv("TEMPORAL_TLS_CERT"); certPath != "" {
+	// Use API KEY
+	if apiKey := os.Getenv("TEMPORAL_API_KEY"); apiKey != "" && useCloudApiKey {
+		clientOpts.Credentials = client.NewAPIKeyStaticCredentials(apiKey)
+		clientOpts.ConnectionOptions = client.ConnectionOptions{
+			TLS: &tls.Config{InsecureSkipVerify: true},
+			DialOptions: []grpc.DialOption{
+				grpc.WithUnaryInterceptor(
+					func(ctx context.Context, method string, req any, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+						return invoker(
+							metadata.AppendToOutgoingContext(ctx, "temporal-namespace", namespaceName),
+							method,
+							req,
+							reply,
+							cc,
+							opts...,
+						)
+					},
+				),
+			},
+		}
+	} else if certPath := os.Getenv("TEMPORAL_TLS_CERT"); certPath != "" {
 		cert, err := tls.LoadX509KeyPair(certPath, os.Getenv("TEMPORAL_TLS_KEY"))
 		if err != nil {
 			return clientOpts, fmt.Errorf("failed loading key pair: %w", err)
@@ -139,9 +166,6 @@ func main() {
 	c, err := client.Dial(clientOptions)
 	defer c.Close()
 	externalscaler.RegisterExternalScalerServer(grpcServer, &Server{client: c})
-
-	// Register reflection service on gRPC server.
-	reflection.Register(grpcServer)
 
 	log.Printf("gRPC server is running on port %s", port)
 	if err := grpcServer.Serve(lis); err != nil {

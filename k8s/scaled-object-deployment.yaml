@@ -13,6 +13,6 @@ spec:
   cooldownPeriod: 10  # Time to wait after downscaling
   triggers:
   - type: external
-    metricType: Value
+#    metricType: Value
     metadata:
       scalerAddress: "external-scaler-service.oms.svc.cluster.local:8080"
